@@ -95,28 +95,60 @@ async function run() {
   card('', '测试中…', '<div class="k">正在请求，请稍候</div>');
 
   const results = [];
-  results.push(await probe('① Worker → CloudBase 排行榜', WORKER + '/leaderboard?offset=0&limit=20&player_id=', true));
-  results.push(await probe('② Worker 健康检查', WORKER + '/leaderboard?offset=0&limit=1&player_id=', true));
-  results.push(await probe('③ 直连 CloudBase（预期会被跨域拦，用于对比）', CLOUDBASE + '/leaderboard?offset=0&limit=20&player_id=', true));
+  results.push(await probe('① 直连 CloudBase · 读排行榜', CLOUDBASE + '/leaderboard?offset=0&limit=20&player_id=', true));
+  results.push(await probe('② 直连 CloudBase · 健康检查', CLOUDBASE + '/', false));
+
+  // Write path: this is the decisive test. If a cross-origin POST also
+  // succeeds, the game can talk to CloudBase directly and the proxy is
+  // unnecessary - which removes the whole workers.dev reachability problem.
+  const tag = 'browser-' + Math.random().toString(36).slice(2, 8);
+  let wrote = null;
+  try {
+    const res = await fetch(CLOUDBASE + '/scores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: tag, score: 999, elapsed_ms: 30000 }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) {}
+    card(res.ok && json && json.submission_id ? 'ok' : 'warn',
+      (res.ok && json && json.submission_id ? '✅' : '⚠️') + ' ③ 直连 CloudBase · 提交分数（写入）',
+      '<div class="row">'
+      + '<div><div class="k">HTTP 状态</div><div class="v">' + res.status + '</div></div>'
+      + '<div><div class="k">CORS 头</div><div class="v">' + esc(res.headers.get('access-control-allow-origin') || '(无)') + '</div></div>'
+      + '</div><pre>' + esc(text.slice(0, 400)) + '</pre>'
+      + '<div class="k" style="margin-top:8px">测试用的 player_id：' + esc(tag) + '</div>');
+    wrote = { ok: !!(res.ok && json && json.submission_id), status: res.status, json };
+  } catch (e) {
+    card('bad', '❌ ③ 直连 CloudBase · 提交分数（写入）',
+      '<pre>' + esc(e && e.message ? e.message : String(e)) + '</pre>'
+      + '<div class="k" style="margin-top:8px">读取能通但写入不通，说明只读跨域被放行。'
+      + '这种情况才需要代理，改用 Vercel。</div>');
+    wrote = { ok: false, error: String(e) };
+  }
+  results.push(Object.assign({ name: '③ 直连 CloudBase · 提交分数' }, wrote));
 
   out.innerHTML = '';
-  const workerOk = results[0].ok;
-  const total = results[0].total;
+  const readOk = results[0].ok;
+  const writeOk = wrote && wrote.ok;
 
-  if (workerOk) {
-    card('ok', '🎉 结论：全部通了',
-      '<div class="k">Worker 转发成功，CloudBase 和数据库都正常。</div>'
-      + '<div style="margin-top:8px">排行榜当前记录数：<span class="v">' + total + '</span>'
-      + (total > 0 ? '（包含一条测试数据，属正常）' : '（表是空的）') + '</div>'
-      + '<div class="k" style="margin-top:8px">下一步：把游戏里的 window.QUIZ_RANK_API_BASE 指向这个 Worker 地址。</div>');
-  } else if (results[0].error && /Failed to fetch|NetworkError|Load failed/i.test(results[0].error)) {
-    card('bad', '❌ 结论：Worker 域名在你网络下不通',
-      '<div class="k">请求根本没到 Worker（不是跨域问题，是网络到不了）。'
-      + '这就是 workers.dev 在国内常见的可达性问题。</div>'
-      + '<div class="k" style="margin-top:8px">把这张截图发我，我给你换成 Vercel 版本（另一个免费平台，国内可达性更好）。</div>');
+  if (readOk && writeOk) {
+    card('ok', '🎉 结论：不需要代理！直连就够了',
+      '<div class="k">读取和写入都通，CloudBase 网关在你这个环境下没有拦跨域。</div>'
+      + '<div style="margin-top:8px">排行榜当前记录数：<span class="v">' + results[0].total + '</span></div>'
+      + '<div class="k" style="margin-top:10px">'
+      + '<b>下一步：游戏里直接填 CloudBase 地址，不要用 Worker。</b><br>'
+      + '把 index.html 里的 <code>window.QUIZ_RANK_API_BASE</code> 改成：<br>'
+      + '<code>' + esc(CLOUDBASE) + '</code>'
+      + '</div>');
+  } else if (readOk && !writeOk) {
+    card('bad', '⚠️ 结论：能读不能写',
+      '<div class="k">读取直连成功，但写入被拦。这种情况需要代理 —— 但不用 Cloudflare Worker'
+      + '（workers.dev 在你网络下不通），换 Vercel。把这张截图发我。</div>');
   } else {
-    card('warn', '⚠️ 结论：Worker 有响应但不正常',
-      '<div class="k">看上面第 ① 条的 HTTP 状态和返回内容，把截图发我。</div>');
+    card('bad', '❌ 结论：直连也不通',
+      '<div class="k">看上面第 ① 条的状态和内容，把截图发我。</div>');
   }
 
   // 再补一段原始汇总，方便复制
