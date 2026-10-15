@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>排行榜连通性测试</title>
+<style>
+  body { margin: 0; padding: 20px; background: #0f1320; color: #e6edf5;
+         font-family: system-ui, "Microsoft YaHei", sans-serif; font-size: 15px; line-height: 1.6; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #8b98ad; font-size: 13px; margin-bottom: 18px; }
+  .card { background: #171c2c; border: 1px solid #273047; border-radius: 8px;
+          padding: 14px 16px; margin-bottom: 14px; }
+  .ok   { border-color: #2f7d4f; background: #14261c; }
+  .bad  { border-color: #8c3b3b; background: #2a1616; }
+  .warn { border-color: #8c7a2f; background: #262214; }
+  .label { font-size: 13px; color: #8b98ad; margin-bottom: 6px; }
+  .big { font-size: 17px; font-weight: 600; }
+  pre { background: #0b0f1a; border: 1px solid #273047; border-radius: 6px;
+        padding: 10px; overflow-x: auto; font-size: 13px; margin: 8px 0 0; white-space: pre-wrap;
+        word-break: break-all; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { min-width: 90px; }
+  .k { color: #8b98ad; font-size: 12px; }
+  .v { font-weight: 600; }
+  button { background: #2a3550; color: #e6edf5; border: 1px solid #3d4a68;
+           border-radius: 6px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #34405f; }
+</style>
+</head>
+<body>
+  <h1>排行榜连通性测试</h1>
+  <div class="sub">打开这个页面就会自动测试一次，把下面的结果截图发我即可。</div>
+
+  <div id="out"></div>
+  <button onclick="run()">重新测试</button>
+
+<script>
+// ⚠️ 如果 Worker 地址变了，改这里
+const WORKER = 'https://quiz-rank-proxy.1131287886.workers.dev';
+// 后端地址（只用于对比，浏览器直连它一定会被跨域拦，这是正常的）
+const CLOUDBASE = 'https://shiyi-acg-quiz-d9g7yozc701ac0027-1507320843.ap-shanghai.app.tcloudbase.com/api';
+
+const out = document.getElementById('out');
+
+function card(cls, title, bodyHtml) {
+  const d = document.createElement('div');
+  d.className = 'card ' + cls;
+  d.innerHTML = '<div class="big">' + title + '</div>' + bodyHtml;
+  out.appendChild(d);
+  return d;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+async function probe(name, url, expectJson) {
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    const ms = Math.round(performance.now() - t0);
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) {}
+
+    const info = '<div class="row">'
+      + '<div><div class="k">HTTP 状态</div><div class="v">' + res.status + '</div></div>'
+      + '<div><div class="k">耗时</div><div class="v">' + ms + ' ms</div></div>'
+      + '<div><div class="k">CORS 头</div><div class="v">' + esc(res.headers.get('access-control-allow-origin') || '(无)') + '</div></div>'
+      + '</div><pre>' + esc(text.slice(0, 500)) + '</pre>';
+
+    if (expectJson && res.ok && json && typeof json.total === 'number') {
+      card('ok', '✅ ' + name + ' —— 成功', info);
+      return { name, ok: true, total: json.total, status: res.status };
+    }
+    if (expectJson) {
+      card('warn', '⚠️ ' + name + ' —— 有响应但不是预期内容', info);
+      return { name, ok: false, status: res.status };
+    }
+    card('ok', 'ℹ️ ' + name, info);
+    return { name, ok: true, status: res.status };
+  } catch (e) {
+    const ms = Math.round(performance.now() - t0);
+    card('bad', '❌ ' + name + ' —— 请求失败',
+      '<div class="row"><div><div class="k">耗时</div><div class="v">' + ms + ' ms</div></div></div>'
+      + '<pre>' + esc(e && e.message ? e.message : String(e)) + '</pre>'
+      + '<div class="k" style="margin-top:8px">如果是 "Failed to fetch"，通常是域名被网络拦住，或跨域被拒。</div>');
+    return { name, ok: false, error: String(e) };
+  }
+}
+
+async function run() {
+  out.innerHTML = '';
+  card('', '测试中…', '<div class="k">正在请求，请稍候</div>');
+
+  const results = [];
+  results.push(await probe('① Worker → CloudBase 排行榜', WORKER + '/leaderboard?offset=0&limit=20&player_id=', true));
+  results.push(await probe('② Worker 健康检查', WORKER + '/leaderboard?offset=0&limit=1&player_id=', true));
+  results.push(await probe('③ 直连 CloudBase（预期会被跨域拦，用于对比）', CLOUDBASE + '/leaderboard?offset=0&limit=20&player_id=', true));
+
+  out.innerHTML = '';
+  const workerOk = results[0].ok;
+  const total = results[0].total;
+
+  if (workerOk) {
+    card('ok', '🎉 结论：全部通了',
+      '<div class="k">Worker 转发成功，CloudBase 和数据库都正常。</div>'
+      + '<div style="margin-top:8px">排行榜当前记录数：<span class="v">' + total + '</span>'
+      + (total > 0 ? '（包含一条测试数据，属正常）' : '（表是空的）') + '</div>'
+      + '<div class="k" style="margin-top:8px">下一步：把游戏里的 window.QUIZ_RANK_API_BASE 指向这个 Worker 地址。</div>');
+  } else if (results[0].error && /Failed to fetch|NetworkError|Load failed/i.test(results[0].error)) {
+    card('bad', '❌ 结论：Worker 域名在你网络下不通',
+      '<div class="k">请求根本没到 Worker（不是跨域问题，是网络到不了）。'
+      + '这就是 workers.dev 在国内常见的可达性问题。</div>'
+      + '<div class="k" style="margin-top:8px">把这张截图发我，我给你换成 Vercel 版本（另一个免费平台，国内可达性更好）。</div>');
+  } else {
+    card('warn', '⚠️ 结论：Worker 有响应但不正常',
+      '<div class="k">看上面第 ① 条的 HTTP 状态和返回内容，把截图发我。</div>');
+  }
+
+  // 再补一段原始汇总，方便复制
+  const summary = document.createElement('div');
+  summary.className = 'card';
+  summary.innerHTML = '<div class="label">原始结果（复制这段发我也行）</div><pre>'
+    + esc(JSON.stringify(results, null, 2)) + '</pre>';
+  out.appendChild(summary);
+}
+
+run();
+</script>
+</body>
+</html>
